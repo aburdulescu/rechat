@@ -145,7 +145,7 @@ func handlePubSub(rdb *redis.Client, connectionsCh chan WSConnData, stopCh chan 
 				i, ok := connectionsMap[connAddr]
 				if !ok {
 					log.Println("pubsub: cannot find", connAddr)
-					break
+					continue
 				}
 				connections[i] = connections[len(connections)-1]
 				connections[len(connections)-1] = nil
@@ -157,6 +157,4 @@ func handlePubSub(rdb *redis.Client, connectionsCh chan WSConnData, stopCh chan 
 			return
 		}
 	}
-
-	log.Println("pubsub: this should not happen")
 }
