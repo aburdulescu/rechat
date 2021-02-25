@@ -5,7 +5,6 @@ import (
 	"flag"
 	"log"
 	"net/http"
-	"sync"
 
 	redis "github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
@@ -49,8 +48,6 @@ func serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.Close()
 
-	wsconn := NewWSConn(c)
-
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "", // no password set
@@ -66,11 +63,11 @@ func serveWS(w http.ResponseWriter, r *http.Request) {
 
 	pubsubStopCh := make(chan struct{})
 
-	go func(ws *WSConn, pubsubCh <-chan *redis.Message, stopCh chan struct{}) {
+	go func(conn *websocket.Conn, pubsubCh <-chan *redis.Message, stopCh chan struct{}) {
 		select {
 		case msg := <-pubsubCh:
 			log.Printf("%s: pubsub: recv: %v\n", clientAddr, msg.Payload)
-			if err = ws.Write([]byte(msg.Payload)); err != nil {
+			if err = conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
 				log.Printf("%s: websocket.Write: %v\n", clientAddr, err)
 				break
 			}
@@ -78,10 +75,10 @@ func serveWS(w http.ResponseWriter, r *http.Request) {
 			log.Println("pubsub done")
 			return
 		}
-	}(wsconn, pubsub.Channel(), pubsubStopCh)
+	}(c, pubsub.Channel(), pubsubStopCh)
 
 	for {
-		mt, msg, err := wsconn.Read()
+		mt, msg, err := c.ReadMessage()
 		if err != nil {
 			log.Printf("%s: websocket.Read: %v\n", clientAddr, err)
 			break
@@ -97,27 +94,4 @@ func serveWS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	pubsubStopCh <- struct{}{}
-}
-
-type WSConn struct {
-	mu sync.Mutex
-	c  *websocket.Conn
-}
-
-func NewWSConn(c *websocket.Conn) *WSConn {
-	wsc := &WSConn{}
-	wsc.c = c
-	return wsc
-}
-
-func (c *WSConn) Read() (messageType int, p []byte, err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.c.ReadMessage()
-}
-
-func (c *WSConn) Write(data []byte) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.c.WriteMessage(websocket.TextMessage, data)
 }
