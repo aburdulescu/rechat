@@ -1,16 +1,23 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
 	"sync"
 
+	redis "github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
+)
+
+const (
+	pubsubChannel = "chat"
 )
 
 var listenAddr = flag.String("addr", ":8080", "http listen address")
 var upgrader = websocket.Upgrader{}
+var ctx = context.Background()
 
 func main() {
 	flag.Parse()
@@ -33,26 +40,63 @@ func serveHome(w http.ResponseWriter, r *http.Request) {
 }
 
 func serveWS(w http.ResponseWriter, r *http.Request) {
+	clientAddr := r.RemoteAddr
+
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Print("upgrade:", err)
+		log.Printf("%s: upgrade: %v\n", clientAddr, err)
 		return
 	}
 	defer c.Close()
-	// TODO: add goroutune that reads redis pubsub messages and sends them to websocket
+
 	wsconn := NewWSConn(c)
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
+
+	pubsub := rdb.Subscribe(ctx, pubsubChannel)
+	if _, err := pubsub.Receive(ctx); err != nil {
+		log.Printf("%s: pubsub.Receive: %v\n", clientAddr, err)
+		return
+	}
+	defer pubsub.Close()
+
+	pubsubStopCh := make(chan struct{})
+
+	go func(ws *WSConn, pubsubCh <-chan *redis.Message, stopCh chan struct{}) {
+		select {
+		case msg := <-pubsubCh:
+			log.Printf("%s: pubsub: recv: %v\n", clientAddr, msg.Payload)
+			if err = ws.Write([]byte(msg.Payload)); err != nil {
+				log.Printf("%s: websocket.Write: %v\n", clientAddr, err)
+				break
+			}
+		case <-stopCh:
+			log.Println("pubsub done")
+			return
+		}
+	}(wsconn, pubsub.Channel(), pubsubStopCh)
+
 	for {
-		mt, message, err := wsconn.Read()
+		mt, msg, err := wsconn.Read()
 		if err != nil {
-			log.Println("read:", err)
+			log.Printf("%s: websocket.Read: %v\n", clientAddr, err)
 			break
 		}
-		log.Printf("recv: %s", message)
-		if err = wsconn.Write(mt, message); err != nil {
-			log.Println("write:", err)
+		if mt != websocket.TextMessage {
+			log.Printf("%s: message type %d not websocket.TextMessage\n", clientAddr, mt)
+			continue
+		}
+		log.Printf("ws: recv: %s", msg)
+		if err := rdb.Publish(ctx, pubsubChannel, string(msg)).Err(); err != nil {
+			log.Printf("%s: redis.Publish: %v\n", clientAddr, err)
 			break
 		}
 	}
+	pubsubStopCh <- struct{}{}
 }
 
 type WSConn struct {
@@ -72,8 +116,8 @@ func (c *WSConn) Read() (messageType int, p []byte, err error) {
 	return c.c.ReadMessage()
 }
 
-func (c *WSConn) Write(messageType int, data []byte) error {
+func (c *WSConn) Write(data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.c.WriteMessage(messageType, data)
+	return c.c.WriteMessage(websocket.TextMessage, data)
 }
