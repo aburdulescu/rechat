@@ -11,18 +11,40 @@ import (
 )
 
 const (
-	pubsubChannel = "chat"
+	pubsubChannel    = "chat"
+	maxWSConnections = 1000
 )
 
 var listenAddr = flag.String("addr", ":8080", "http listen address")
 var upgrader = websocket.Upgrader{}
-var ctx = context.Background()
 
 func main() {
 	flag.Parse()
+
+	log.SetFlags(log.Lshortfile | log.Ltime | log.Lmicroseconds | log.LUTC)
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379",
+		Password: "", // no password set
+		DB:       0,  // use default DB
+	})
+
+	s := Server{
+		rdb:         rdb,
+		connections: make(chan WSConnData, maxWSConnections),
+	}
+
+	pubsubStop := make(chan struct{})
+	defer func() {
+		pubsubStop <- struct{}{} // TODO: this doesn't work
+	}()
+
+	go handlePubSub(s.rdb, s.connections, pubsubStop)
+
 	http.HandleFunc("/", serveHome)
-	http.HandleFunc("/ws", serveWS)
-	log.Fatal(http.ListenAndServe(*listenAddr, nil))
+	http.HandleFunc("/ws", s.handleConnection)
+
+	log.Fatal(http.ListenAndServe(*listenAddr, nil)) // TODO: stop this on CTRL-C
 }
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
@@ -38,8 +60,20 @@ func serveHome(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, "index.html")
 }
 
-func serveWS(w http.ResponseWriter, r *http.Request) {
+type WSConnData struct {
+	c        *websocket.Conn
+	isActive bool
+}
+
+type Server struct {
+	rdb         *redis.Client
+	connections chan WSConnData
+}
+
+func (s Server) handleConnection(w http.ResponseWriter, r *http.Request) {
 	clientAddr := r.RemoteAddr
+
+	log.Println("new conn from", clientAddr)
 
 	c, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -48,34 +82,9 @@ func serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.Close()
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "", // no password set
-		DB:       0,  // use default DB
-	})
-
-	pubsub := rdb.Subscribe(ctx, pubsubChannel)
-	if _, err := pubsub.Receive(ctx); err != nil {
-		log.Printf("%s: pubsub.Receive: %v\n", clientAddr, err)
-		return
-	}
-	defer pubsub.Close()
-
-	pubsubStopCh := make(chan struct{})
-
-	go func(conn *websocket.Conn, pubsubCh <-chan *redis.Message, stopCh chan struct{}) {
-		select {
-		case msg := <-pubsubCh:
-			log.Printf("%s: pubsub: recv: %v\n", clientAddr, msg.Payload)
-			if err = conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
-				log.Printf("%s: websocket.Write: %v\n", clientAddr, err)
-				break
-			}
-		case <-stopCh:
-			log.Println("pubsub done")
-			return
-		}
-	}(c, pubsub.Channel(), pubsubStopCh)
+	log.Printf("%s: send conn\n", clientAddr)
+	s.connections <- WSConnData{c, true}
+	log.Printf("%s: conn sent\n", clientAddr)
 
 	for {
 		mt, msg, err := c.ReadMessage()
@@ -87,11 +96,67 @@ func serveWS(w http.ResponseWriter, r *http.Request) {
 			log.Printf("%s: message type %d not websocket.TextMessage\n", clientAddr, mt)
 			continue
 		}
-		log.Printf("ws: recv: %s", msg)
-		if err := rdb.Publish(ctx, pubsubChannel, string(msg)).Err(); err != nil {
+		log.Printf("%s: ws: recv: %s", clientAddr, msg)
+		if err := s.rdb.Publish(context.Background(), pubsubChannel, string(msg)).Err(); err != nil {
 			log.Printf("%s: redis.Publish: %v\n", clientAddr, err)
 			break
 		}
+		log.Printf("%s: redis: publish ok", clientAddr)
 	}
-	pubsubStopCh <- struct{}{}
+
+	s.connections <- WSConnData{c, false}
+}
+
+func handlePubSub(rdb *redis.Client, connectionsCh chan WSConnData, stopCh chan struct{}) {
+	pubsub := rdb.Subscribe(context.Background(), pubsubChannel)
+	if _, err := pubsub.Receive(context.Background()); err != nil {
+		log.Println("pubsub.Receive: ", err)
+		return
+	}
+	defer pubsub.Close()
+
+	var connections []*websocket.Conn
+
+	connectionsMap := make(map[string]int)
+
+	pubsubCh := pubsub.Channel()
+
+	log.Println("now will wait for things")
+
+	for {
+		select {
+		case msg := <-pubsubCh:
+			log.Println("pubsub: recv:", msg.Payload)
+			for _, c := range connections {
+				log.Printf("pubsub: send msg to %s\n", c.UnderlyingConn().RemoteAddr())
+				if err := c.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
+					log.Println("websocket.Write:", err)
+					continue
+				}
+				log.Printf("pubsub: sent msg to %s\n", c.UnderlyingConn().RemoteAddr())
+			}
+		case conn := <-connectionsCh:
+			connAddr := conn.c.UnderlyingConn().RemoteAddr().String()
+			log.Println("pubsub: new connection:", connAddr, conn.isActive)
+			if conn.isActive {
+				connections = append(connections, conn.c)
+				connectionsMap[connAddr] = len(connections) - 1
+			} else {
+				i, ok := connectionsMap[connAddr]
+				if !ok {
+					log.Println("pubsub: cannot find", connAddr)
+					break
+				}
+				connections[i] = connections[len(connections)-1]
+				connections[len(connections)-1] = nil
+				connections = connections[:len(connections)-1]
+			}
+			log.Println("pubsub: connection handled:", conn.c.UnderlyingConn().RemoteAddr(), conn.isActive)
+		case <-stopCh:
+			log.Println("pubsub: done")
+			return
+		}
+	}
+
+	log.Println("pubsub: this should not happen")
 }
