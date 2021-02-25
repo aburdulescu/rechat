@@ -40,40 +40,40 @@ func serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.Close()
 	// TODO: add goroutune that reads redis pubsub messages and sends them to websocket
-	wsr := NewWSReader(c)
+	wsconn := NewWSConn(c)
 	for {
-		mt, message, err := wsr.Read()
+		mt, message, err := wsconn.Read()
 		if err != nil {
 			log.Println("read:", err)
 			break
 		}
 		log.Printf("recv: %s", message)
-		if err = wsr.Write(mt, message); err != nil {
+		if err = wsconn.Write(mt, message); err != nil {
 			log.Println("write:", err)
 			break
 		}
 	}
 }
 
-type WSReader struct {
+type WSConn struct {
 	mu sync.Mutex
 	c  *websocket.Conn
 }
 
-func NewWSReader(c *websocket.Conn) *WSReader {
-	r := &WSReader{}
-	r.c = c
-	return r
+func NewWSConn(c *websocket.Conn) *WSConn {
+	wsc := &WSConn{}
+	wsc.c = c
+	return wsc
 }
 
-func (r *WSReader) Read() (messageType int, p []byte, err error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.c.ReadMessage()
+func (c *WSConn) Read() (messageType int, p []byte, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.c.ReadMessage()
 }
 
-func (r *WSReader) Write(messageType int, data []byte) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.c.WriteMessage(messageType, data)
+func (c *WSConn) Write(messageType int, data []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.c.WriteMessage(messageType, data)
 }
