@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
@@ -38,17 +39,41 @@ func serveWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
+	// TODO: add goroutune that reads redis pubsub messages and sends them to websocket
+	wsr := NewWSReader(c)
 	for {
-		mt, message, err := c.ReadMessage()
+		mt, message, err := wsr.Read()
 		if err != nil {
 			log.Println("read:", err)
 			break
 		}
 		log.Printf("recv: %s", message)
-		err = c.WriteMessage(mt, message)
-		if err != nil {
+		if err = wsr.Write(mt, message); err != nil {
 			log.Println("write:", err)
 			break
 		}
 	}
+}
+
+type WSReader struct {
+	mu sync.Mutex
+	c  *websocket.Conn
+}
+
+func NewWSReader(c *websocket.Conn) *WSReader {
+	r := &WSReader{}
+	r.c = c
+	return r
+}
+
+func (r *WSReader) Read() (messageType int, p []byte, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.c.ReadMessage()
+}
+
+func (r *WSReader) Write(messageType int, data []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.c.WriteMessage(messageType, data)
 }
