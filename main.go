@@ -117,16 +117,13 @@ func handlePubSub(rdb *redis.Client, connectionsCh chan WSConnData, stopCh chan 
 
 	var connections []*websocket.Conn
 
-	connectionsMap := make(map[string]int)
-
 	pubsubCh := pubsub.Channel()
-
-	log.Println("now will wait for things")
 
 	for {
 		select {
 		case msg := <-pubsubCh:
 			log.Println("pubsub: recv:", msg.Payload)
+			log.Println("no. connections:", len(connections))
 			for _, c := range connections {
 				log.Printf("pubsub: send msg to %s\n", c.UnderlyingConn().RemoteAddr())
 				if err := c.WriteMessage(websocket.TextMessage, []byte(msg.Payload)); err != nil {
@@ -138,23 +135,33 @@ func handlePubSub(rdb *redis.Client, connectionsCh chan WSConnData, stopCh chan 
 		case conn := <-connectionsCh:
 			connAddr := conn.c.UnderlyingConn().RemoteAddr().String()
 			log.Println("pubsub: new connection:", connAddr, conn.isActive)
+			log.Println("no. connections:", len(connections))
 			if conn.isActive {
 				connections = append(connections, conn.c)
-				connectionsMap[connAddr] = len(connections) - 1
 			} else {
-				i, ok := connectionsMap[connAddr]
-				if !ok {
+				i := findConn(connections, conn.c)
+				if i == -1 {
 					log.Println("pubsub: cannot find", connAddr)
 					continue
 				}
-				connections[i] = connections[len(connections)-1]
+				copy(connections[i:], connections[i+1:])
 				connections[len(connections)-1] = nil
 				connections = connections[:len(connections)-1]
 			}
-			log.Println("pubsub: connection handled:", conn.c.UnderlyingConn().RemoteAddr(), conn.isActive)
+			log.Println("pubsub: connection handled:", connAddr, conn.isActive)
+			log.Println("no. connections:", len(connections))
 		case <-stopCh:
 			log.Println("pubsub: done")
 			return
 		}
 	}
+}
+
+func findConn(connections []*websocket.Conn, conn *websocket.Conn) int {
+	for i, c := range connections {
+		if c.UnderlyingConn().RemoteAddr() == conn.UnderlyingConn().RemoteAddr() {
+			return i
+		}
+	}
+	return -1
 }
