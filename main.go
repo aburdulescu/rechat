@@ -11,7 +11,9 @@ import (
 )
 
 const (
-	pubsubChannel    = "chat"
+	pubsubChannel = "chat"
+	historyList   = "history"
+
 	maxWSConnections = 1000
 )
 
@@ -70,6 +72,27 @@ type Server struct {
 	connections chan WSConnData
 }
 
+func (s Server) sendHistory(c *websocket.Conn) error {
+	cmd := s.rdb.LRange(context.Background(), historyList, 0, -1)
+
+	err := cmd.Err()
+	if err != nil {
+		log.Println("redis.LRange:", err)
+		return err
+	}
+
+	history := cmd.Val()
+
+	for _, msg := range history {
+		if err := c.WriteMessage(websocket.TextMessage, []byte(msg)); err != nil {
+			log.Println("websocket.Write:", err)
+			continue
+		}
+	}
+
+	return nil
+}
+
 func (s Server) handleConnection(w http.ResponseWriter, r *http.Request) {
 	clientAddr := r.RemoteAddr
 
@@ -81,6 +104,10 @@ func (s Server) handleConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer c.Close()
+
+	if err := s.sendHistory(c); err != nil {
+		return
+	}
 
 	log.Printf("%s: send conn\n", clientAddr)
 	s.connections <- WSConnData{c, true}
@@ -102,6 +129,10 @@ func (s Server) handleConnection(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		log.Printf("%s: redis: publish ok", clientAddr)
+		if err := s.rdb.RPush(context.Background(), historyList, string(msg)).Err(); err != nil {
+			log.Printf("%s: redis.RPush: %v\n", clientAddr, err)
+			break
+		}
 	}
 
 	s.connections <- WSConnData{c, false}
