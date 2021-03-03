@@ -33,6 +33,14 @@ func main() {
 
 	defer printGoroutines()
 
+	var doneWg sync.WaitGroup
+	doneWg.Add(1) // http server
+	doneWg.Add(1) // pubsub
+	defer func() {
+		doneWg.Wait()
+		log.Println("shutdown done")
+	}()
+
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt)
 
@@ -42,14 +50,6 @@ func main() {
 		DB:       0,  // use default DB
 	})
 	defer rdb.Close()
-
-	var doneWg sync.WaitGroup
-	doneWg.Add(1) // http server
-	doneWg.Add(1) // pubsub
-	defer func() {
-		doneWg.Wait()
-		log.Println("shutdown done")
-	}()
 
 	s := Server{
 		rdb:         rdb,
