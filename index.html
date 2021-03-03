@@ -7,6 +7,10 @@
         var msg = document.getElementById("msg");
         var log = document.getElementById("log");
 
+        function clearLog(item) {
+          log.value = ""
+        }
+
         function appendLog(item) {
           log.value += item+"\n"
         }
@@ -26,6 +30,7 @@
         if (window["WebSocket"]) {
           conn = new WebSocket("ws://" + document.location.host + "/ws");
           conn.onclose = function (evt) {
+            clearLog()
             appendLog("Connection closed")
           };
           conn.onmessage = function (evt) {
