@@ -203,6 +203,10 @@ func handlePubSub(ctx context.Context, rdb *redis.Client, connectionsCh chan WSC
 	for {
 		select {
 		case msg := <-pubsubCh:
+			if msg == nil {
+				log.Println("pubsub: nil msg")
+				continue
+			}
 			log.Println("pubsub: recv:", msg.Payload)
 			log.Println("no. connections:", len(connections))
 			for _, c := range connections {
