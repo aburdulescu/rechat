@@ -5,6 +5,9 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"time"
 
 	redis "github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
@@ -37,16 +40,46 @@ func main() {
 	}
 
 	pubsubStop := make(chan struct{})
-	defer func() {
-		pubsubStop <- struct{}{} // TODO: this doesn't work
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/", serveHome)
+	mux.HandleFunc("/ws", s.handleConnection)
+
+	srv := http.Server{
+		Addr:    *listenAddr,
+		Handler: mux,
+	}
+
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt)
+
+	go func() {
+		log.Println("http server listening on", *listenAddr)
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			log.Println("srv.ListenAndServe:", err)
+		}
 	}()
 
 	go handlePubSub(s.rdb, s.connections, pubsubStop)
 
-	http.HandleFunc("/", serveHome)
-	http.HandleFunc("/ws", s.handleConnection)
+	<-done
 
-	log.Fatal(http.ListenAndServe(*listenAddr, nil)) // TODO: stop this on CTRL-C
+	log.Println("received signal to stop")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		cancel()
+	}()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("HTTP server Shutdown: %v", err)
+	}
+
+	pubsubStop <- struct{}{}
+	<-pubsubStop
+
+	log.Println("gracefull shutdown done")
 }
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +216,7 @@ func handlePubSub(rdb *redis.Client, connectionsCh chan WSConnData, stopCh chan 
 			log.Println("no. connections:", len(connections))
 		case <-stopCh:
 			log.Println("pubsub: done")
+			stopCh <- struct{}{}
 			return
 		}
 	}
