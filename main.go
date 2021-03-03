@@ -41,6 +41,9 @@ func main() {
 		log.Println("shutdown done")
 	}()
 
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt)
 
@@ -54,6 +57,7 @@ func main() {
 	s := Server{
 		rdb:         rdb,
 		connections: make(chan WSConnData, maxWSConnections),
+		ctx:         cancelCtx,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", serveHome)
@@ -71,9 +75,7 @@ func main() {
 		log.Println("http server stopped")
 	}()
 
-	pubsubCtx, pubsubCancel := context.WithCancel(context.Background())
-	defer pubsubCancel()
-	go handlePubSub(pubsubCtx, s.rdb, s.connections, &doneWg)
+	go handlePubSub(cancelCtx, s.rdb, s.connections, &doneWg)
 
 	<-done
 
@@ -115,10 +117,11 @@ type WSConnData struct {
 type Server struct {
 	rdb         *redis.Client
 	connections chan WSConnData
+	ctx         context.Context
 }
 
 func (s Server) sendHistory(c *websocket.Conn) error {
-	cmd := s.rdb.LRange(context.Background(), historyList, 0, -1)
+	cmd := s.rdb.LRange(s.ctx, historyList, 0, -1)
 
 	err := cmd.Err()
 	if err != nil {
@@ -169,12 +172,12 @@ func (s Server) handleConnection(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		log.Printf("%s: ws: recv: %s", clientAddr, msg)
-		if err := s.rdb.Publish(context.Background(), pubsubChannel, string(msg)).Err(); err != nil {
+		if err := s.rdb.Publish(s.ctx, pubsubChannel, string(msg)).Err(); err != nil {
 			log.Printf("%s: redis.Publish: %v\n", clientAddr, err)
 			break
 		}
 		log.Printf("%s: redis: publish ok", clientAddr)
-		if err := s.rdb.RPush(context.Background(), historyList, string(msg)).Err(); err != nil {
+		if err := s.rdb.RPush(s.ctx, historyList, string(msg)).Err(); err != nil {
 			log.Printf("%s: redis.RPush: %v\n", clientAddr, err)
 			break
 		}
@@ -186,8 +189,8 @@ func (s Server) handleConnection(w http.ResponseWriter, r *http.Request) {
 func handlePubSub(ctx context.Context, rdb *redis.Client, connectionsCh chan WSConnData, doneWg *sync.WaitGroup) {
 	defer doneWg.Done()
 
-	pubsub := rdb.Subscribe(context.Background(), pubsubChannel)
-	if _, err := pubsub.Receive(context.Background()); err != nil {
+	pubsub := rdb.Subscribe(ctx, pubsubChannel)
+	if _, err := pubsub.Receive(ctx); err != nil {
 		log.Println("pubsub.Receive: ", err)
 		return
 	}
