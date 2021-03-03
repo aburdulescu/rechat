@@ -160,7 +160,7 @@ func (s Server) handleConnection(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s: conn sent\n", clientAddr)
 
 	for {
-		mt, msg, err := c.ReadMessage()
+		mt, msg, err := c.ReadMessage() // TODO: this blocks goroutine and is leaked!!!
 		if err != nil {
 			log.Printf("%s: websocket.Read: %v\n", clientAddr, err)
 			break
