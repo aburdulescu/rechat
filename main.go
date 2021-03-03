@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"sync"
 	"time"
 
 	redis "github.com/go-redis/redis/v8"
@@ -28,6 +31,8 @@ func main() {
 
 	log.SetFlags(log.Lshortfile | log.Ltime | log.Lmicroseconds | log.LUTC)
 
+	defer printGoroutines()
+
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt)
 
@@ -36,6 +41,15 @@ func main() {
 		Password: "", // no password set
 		DB:       0,  // use default DB
 	})
+	defer rdb.Close()
+
+	var doneWg sync.WaitGroup
+	doneWg.Add(1) // http server
+	doneWg.Add(1) // pubsub
+	defer func() {
+		doneWg.Wait()
+		log.Println("shutdown done")
+	}()
 
 	s := Server{
 		rdb:         rdb,
@@ -49,17 +63,17 @@ func main() {
 		Handler: mux,
 	}
 	go func() {
+		defer doneWg.Done()
 		log.Println("http server listening on", *listenAddr)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 			log.Println("srv.ListenAndServe:", err)
 		}
+		log.Println("http server stopped")
 	}()
 
 	pubsubCtx, pubsubCancel := context.WithCancel(context.Background())
-	go handlePubSub(pubsubCtx, s.rdb, s.connections)
-	defer func() {
-		pubsubCancel()
-	}()
+	go handlePubSub(pubsubCtx, s.rdb, s.connections, &doneWg)
+	defer func() { pubsubCancel() }()
 
 	<-done
 
@@ -70,6 +84,15 @@ func main() {
 	if err := srv.Shutdown(httpCtx); err != nil {
 		log.Println("srv.Shutdown", err)
 	}
+}
+
+func printGoroutines() {
+	ngoroutines := runtime.NumGoroutine()
+	fmt.Println("num goroutines:", ngoroutines)
+
+	b := make([]byte, ngoroutines*1024)
+	n := runtime.Stack(b, true)
+	fmt.Print(string(b[:n]))
 }
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +184,9 @@ func (s Server) handleConnection(w http.ResponseWriter, r *http.Request) {
 	s.connections <- WSConnData{c, false}
 }
 
-func handlePubSub(ctx context.Context, rdb *redis.Client, connectionsCh chan WSConnData) {
+func handlePubSub(ctx context.Context, rdb *redis.Client, connectionsCh chan WSConnData, doneWg *sync.WaitGroup) {
+	defer doneWg.Done()
+
 	pubsub := rdb.Subscribe(context.Background(), pubsubChannel)
 	if _, err := pubsub.Receive(context.Background()); err != nil {
 		log.Println("pubsub.Receive: ", err)
