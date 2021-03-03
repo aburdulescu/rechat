@@ -28,6 +28,9 @@ func main() {
 
 	log.SetFlags(log.Lshortfile | log.Ltime | log.Lmicroseconds | log.LUTC)
 
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt)
+
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "", // no password set
@@ -38,22 +41,13 @@ func main() {
 		rdb:         rdb,
 		connections: make(chan WSConnData, maxWSConnections),
 	}
-
-	pubsubStop := make(chan struct{})
-
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("/", serveHome)
 	mux.HandleFunc("/ws", s.handleConnection)
-
 	srv := http.Server{
 		Addr:    *listenAddr,
 		Handler: mux,
 	}
-
-	done := make(chan os.Signal, 1)
-	signal.Notify(done, os.Interrupt)
-
 	go func() {
 		log.Println("http server listening on", *listenAddr)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
@@ -61,25 +55,21 @@ func main() {
 		}
 	}()
 
-	go handlePubSub(s.rdb, s.connections, pubsubStop)
+	pubsubCtx, pubsubCancel := context.WithCancel(context.Background())
+	go handlePubSub(pubsubCtx, s.rdb, s.connections)
+	defer func() {
+		pubsubCancel()
+	}()
 
 	<-done
 
-	log.Println("received signal to stop")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer func() {
-		cancel()
+		httpCancel()
 	}()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("HTTP server Shutdown: %v", err)
+	if err := srv.Shutdown(httpCtx); err != nil {
+		log.Println("srv.Shutdown", err)
 	}
-
-	pubsubStop <- struct{}{}
-	<-pubsubStop
-
-	log.Println("gracefull shutdown done")
 }
 
 func serveHome(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +161,7 @@ func (s Server) handleConnection(w http.ResponseWriter, r *http.Request) {
 	s.connections <- WSConnData{c, false}
 }
 
-func handlePubSub(rdb *redis.Client, connectionsCh chan WSConnData, stopCh chan struct{}) {
+func handlePubSub(ctx context.Context, rdb *redis.Client, connectionsCh chan WSConnData) {
 	pubsub := rdb.Subscribe(context.Background(), pubsubChannel)
 	if _, err := pubsub.Receive(context.Background()); err != nil {
 		log.Println("pubsub.Receive: ", err)
@@ -214,9 +204,8 @@ func handlePubSub(rdb *redis.Client, connectionsCh chan WSConnData, stopCh chan 
 			}
 			log.Println("pubsub: connection handled:", connAddr, conn.isActive)
 			log.Println("no. connections:", len(connections))
-		case <-stopCh:
+		case <-ctx.Done():
 			log.Println("pubsub: done")
-			stopCh <- struct{}{}
 			return
 		}
 	}
