@@ -72,15 +72,14 @@ func main() {
 	}()
 
 	pubsubCtx, pubsubCancel := context.WithCancel(context.Background())
+	defer pubsubCancel()
 	go handlePubSub(pubsubCtx, s.rdb, s.connections, &doneWg)
-	defer func() { pubsubCancel() }()
 
 	<-done
 
 	httpCtx, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer func() {
-		httpCancel()
-	}()
+	defer httpCancel()
+
 	if err := srv.Shutdown(httpCtx); err != nil {
 		log.Println("srv.Shutdown", err)
 	}
