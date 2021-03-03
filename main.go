@@ -230,6 +230,9 @@ func handlePubSub(ctx context.Context, rdb *redis.Client, connectionsCh chan WSC
 			log.Println("pubsub: connection handled:", connAddr, conn.isActive)
 			log.Println("no. connections:", len(connections))
 		case <-ctx.Done():
+			for _, c := range connections {
+				c.Close()
+			}
 			log.Println("pubsub: done")
 			return
 		}
