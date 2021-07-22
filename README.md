@@ -13,6 +13,7 @@ Run: `go get github.com/aburdulescu/rechat`
 For example, on Debian:
 ```
 sudo apt install redis
+sudo systemctl start redis-server.service
 ```
 
 - start `rechat` server:
