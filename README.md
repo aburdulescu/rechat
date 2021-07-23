@@ -2,9 +2,13 @@
 
 Very simple demo chat app using Websockets and Redis PubSub
 
-## Install
+## Build
 
-Run: `go get github.com/aburdulescu/rechat`
+```
+git clone https://github.com/aburdulescu/rechat.git
+cd rechat
+go build
+```
 
 ## Usage
 
@@ -19,6 +23,7 @@ sudo systemctl start redis-server.service
 - start `rechat` server:
 
 ```
+cd rechat
 ./rechat
 ```
 
